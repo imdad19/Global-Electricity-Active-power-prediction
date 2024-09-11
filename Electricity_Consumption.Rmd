@@ -1,0 +1,372 @@
+---
+title: "Global Electricity Active Power Prediction"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  md_document:
+    variant: gfm
+  html_notebook: default
+  html_document:
+    df_print: paged
+author: AOUIDANE Imed Eddine
+---
+
+```{r,message=FALSE,warning=FALSE}
+library(tidyverse)
+library(TSstudio)
+library(xts)
+library(forecast)
+library(readr)
+library(lubridate)
+library(dygraphs)
+library(imputeTS)
+Sys.setlocale("LC_ALL",locale = "eng")
+```
+# Data Description
+
+## Attribute Information
+
+- **date**: Date in format `dd/mm/yyyy`
+- **time**: Time in format `hh:mm:ss`
+- **global_active_power**: Household global minute-averaged active power (in kilowatt)
+- **global_reactive_power**: Household global minute-averaged reactive power (in kilowatt)
+- **voltage**: Minute-averaged voltage (in volt)
+- **global_intensity**: Household global minute-averaged current intensity (in ampere)
+- **sub_metering_1**: Energy sub-metering No. 1 (in watt-hour of active energy), corresponding to the kitchen.
+- **sub_metering_2**: Energy sub-metering No. 2 (in watt-hour of active energy), corresponding to the laundry room.
+- **sub_metering_3**: Energy sub-metering No. 3 (in watt-hour of active energy), corresponding to an electric water-heater and an air-conditioner.
+
+## Notes
+
+1. The expression `(global_active_power*1000/60 - sub_metering_1 - sub_metering_2 - sub_metering_3)` represents the active energy consumed every minute (in watt-hour) by electrical equipment not measured by the sub-meterings.
+2. The dataset contains missing values (approximately 1.25% of the rows). Missing values are represented by the absence of values between two consecutive semi-colon attribute separators. For example, missing values are observed on April 28, 2007.
+
+## Original Source
+
+- Georges Hébrail, Senior Researcher, EDF R&D, Clamart, France
+- Alice Bérard, TELECOM ParisTech Master of Engineering Internship at EDF R&D, Clamart, France
+
+
+```{r}
+read.csv("C:\\Users\\dell\\Downloads\\pc\\fac\\4eme\\time series analysis\\individual+household+electric+power+consumption\\household_power_consumption.txt",sep = ";") -> data
+head(data)
+```
+
+```{r}
+dim(data)
+```
+
+
+```{r}
+data$Date <- as.Date(data$Date,format = "%d/%m/%Y")
+data <- data %>% 
+  mutate(Date_time = lubridate::ymd(Date) + lubridate::hms(Time)) %>% 
+  mutate_if(is.character,as.numeric) %>% 
+  mutate(apparent_power = sqrt(Global_active_power^2 + Global_reactive_power^2)) %>% 
+  select(-Date,-Time,-Global_reactive_power) %>%
+  select(Date_time,apparent_power,everything())
+head(data)
+```
+# Calculating the power factor 
+```{r}
+data$power_factor <- data$Global_active_power/data$apparent_power
+```
+
+```{r}
+data %>% 
+  map(~sum(is.na(.)))
+```
+
+
+```{r}
+xts_data <- xts(data[,-1],order.by = data$Date_time)
+head(xts_data)
+```
+
+```{r}
+ts_info(xts_data)
+```
+```{r}
+skimr::skim(xts_data)
+```
+
+
+## Ploting for a single day
+```{r}
+dt <- seq.POSIXt(from = as.POSIXct("2006-12-17 00:00:00"),to = as.POSIXct("2006-12-18 00:00:00"),by = "min")
+dygraph(xts_data[dt,2]) %>% 
+  dyRangeSelector()
+```
+- We can see that the Global active power experiences a positive trend after 08:00 AM. and a negative one after 22:00 PM. indicating high power demand in the day 
+## Plotting the power factor 
+```{r}
+dygraph(xts_data[dt,8]) %>% 
+  dyRangeSelector()
+```
+- The power factor shows alot of noise during the night, while in the day its almost stable which means the total power used in the circuit is high.
+
+## NA's Interpolation
+- From the statistical resume we saw earlier we can see that there's alot of missing values, which we need to fix before doing furthur analysis , droping the missing values isn't a solution so we have to fix it. one of the most efficient ways for a large dataset such as ours is na.approx which performs linear interpolation efficiently and it's optimized for large datasets, making it a good choice when you have many missing values.
+```{r}
+xts_data <- na.approx(xts_data)
+```
+
+## Aggregated data 
+```{r}
+agg_data_daily <- apply.daily(xts_data,FUN = mean)
+agg_data_monthly <- apply.monthly(xts_data,FUN = mean)
+```
+
+```{r}
+# Plotting the first trimester of 2007
+dygraph(agg_data_daily[time(agg_data_daily) > "2007-01-01 23:59:00 UTC" &
+                         time(agg_data_daily) < "2007-04-01 23:59:00 UTC",
+                       2]) %>% 
+  dyRangeSelector()
+```
+- We can see that there's a sort of seasonality with some fluctuations, we can consider it as an anomali 
+
+```{r}
+# Power factor for the trimester
+dygraph(agg_data_daily[time(agg_data_daily) > "2007-01-01 23:59:00 UTC" &
+                         time(agg_data_daily) < "2007-04-01 23:59:00 UTC",
+                       8]) %>% 
+  dyRangeSelector()
+```
+
+
+```{r}
+# plotting monthly consumption
+dygraph(agg_data_monthly[,2]) %>% 
+  dyRangeSelector()
+```
+
+- Same thing as the trimester 
+
+```{r}
+# Monthly Power factor 
+dygraph(agg_data_daily[,8]) %>% 
+  dyRangeSelector()
+```
+
+```{r}
+head(agg_data_monthly)
+```
+
+
+## Seasonal decomposition
+```{r}
+# Daily data
+ts_data_daily <- ts(agg_data_daily[, "Global_active_power"], frequency = 365)
+ts_data_daily_decomposed <- decompose(ts_data_daily)
+ts_decompose(ts_data_daily,type = "all")
+```
+
+```{r}
+# Monthly data
+ts_data_monthly <- ts(agg_data_monthly[, "Global_active_power"], frequency = 12)
+ts_decompose(ts_data_monthly,type = "all")
+```
+
+## Correlation
+
+```{r}
+corrplot::corrplot(cor(xts_data),method = "number")
+```
+- Based on the correlation analysis, we observed that global active power is highly correlated with both apparent power and global intensity, suggesting potential redundancy. To avoid multicollinearity, we can consider dropping apparent power and global intensity for future modeling steps. Additionally, voltage shows a negative correlation with the power variables, providing useful variability, while the sub-metering variables and power factor have a significant correlation with the target variable (Global active power) so they can be used to predict it.
+
+
+# Feature Engineering 
+- Using tsfeatures package to extract various features from our time series data.
+
+
+```{r}
+daily_modeling_data <- agg_data_daily[,- c(1,4)]
+head(daily_modeling_data)
+```
+
+```{r}
+tsfeatures::tsfeatures(daily_modeling_data)
+```
+
+
+```{r}
+index(daily_modeling_data) <- as.POSIXct(index(daily_modeling_data))
+```
+
+### Adding additional features
+```{r}
+daily_modeling_data$week_day <- as.factor(weekdays(index(daily_modeling_data)))
+daily_modeling_data$month <- month(index(daily_modeling_data))
+daily_modeling_data$seasonal <- ts_data_daily_decomposed$seasonal
+daily_modeling_data$trend <- ts_data_daily_decomposed$trend
+daily_modeling_data$year <- as.numeric(year(index(daily_modeling_data)))
+head(daily_modeling_data)
+```
+# Modeling 
+- We will model only the daily data due to the lack small ammount of data we have in the monthly dataset
+
+## Converting the data into a dataframe
+```{r}
+daily_modeling_data_as_df <- data.frame(daily_modeling_data)
+daily_modeling_data_as_df$date <- time(daily_modeling_data)
+daily_modeling_data_as_df <- daily_modeling_data_as_df %>% 
+  select(date,year,month,week_day,Global_active_power, everything()) %>% 
+  mutate(date = as.Date(date))
+head(daily_modeling_data_as_df)
+```
+
+
+```{r}
+dim(daily_modeling_data_as_df)
+```
+
+```{r}
+daily_modeling_data_as_df %>% 
+  map(~sum(is.na(.)))
+```
+
+- Adding the trend as a feature resulted of having missing values at the beggining and at the end of the series due to the way of calculating the trend through moving average. 
+
+```{r}
+cleaned_data <- daily_modeling_data_as_df %>% 
+  na.omit()
+cleaned_data %>% 
+  map(~sum(is.na(.)))
+```
+
+```{r}
+head(cleaned_data)
+```
+
+## Modeling with tidymodels
+```{r , message=FALSE,warning=FALSE}
+library(tidymodels)
+```
+
+### Splitting the data 
+- Because our data is a time series we will use initial_time_split function so it would make a time based split. 
+```{r}
+splitted_data <- initial_time_split(cleaned_data)
+train_data <- training(splitted_data)
+test_data <- testing(splitted_data)
+```
+
+```{r}
+dim(train_data)
+```
+
+```{r}
+dim(test_data)
+```
+
+## Setting the models
+- Instead of processing the data we can set a workflow for each model 
+### Random forest 
+```{r}
+randomf_model <- rand_forest() %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+
+randomf_workflow <- workflow() %>%
+  add_recipe(recipe(Global_active_power ~ ., data = train_data) %>%
+               step_normalize(all_numeric_predictors()) %>%
+               step_dummy(all_factor_predictors())) %>%
+  add_model(randomf_model)
+```
+
+### XGboost model
+
+```{r}
+library(xgboost)
+xgboost_model <- boost_tree(trees = 1000, 
+                            tree_depth = 6, 
+                            learn_rate = 0.1, 
+                            loss_reduction = 0.01, 
+                            sample_size = 0.8, 
+                            mtry = 2) %>%
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+xgboost_workflow <- workflow() %>%
+  add_recipe(recipe(Global_active_power ~ ., data = train_data) %>%
+               step_rm(date) %>% 
+               step_normalize(all_numeric_predictors()) %>%
+               step_dummy(all_factor_predictors())) %>%
+  add_model(xgboost_model)
+```
+
+## Fitting the models 
+
+### Random forest models
+```{r}
+randomf_fit <- fit(randomf_workflow, data = train_data)
+randomf_predictions <- predict(randomf_fit, test_data)
+```
+
+### XGboost model
+```{r}
+xgboost_fit <- fit(xgboost_workflow, data = train_data)
+xgboost_predictions <- predict(xgboost_fit, test_data)
+```
+
+
+
+# Evaluating The Models
+
+```{r}
+randomf_rmse <- randomf_predictions %>%
+  bind_cols(test_data) %>%
+  rmse(truth = Global_active_power, estimate = .pred)
+
+xgboost_rmse <- xgboost_predictions %>%
+  bind_cols(test_data) %>%
+  rmse(truth = Global_active_power, estimate = .pred)
+
+randomf_rmse
+```
+```{r}
+xgboost_rmse
+```
+
+# Visualising the result 
+- Since the random forest model gave the best result we can proceed with it 
+```{r}
+results <- test_data %>%
+  select(Global_active_power) %>%
+  mutate(randomf_pred = randomf_predictions$.pred,
+         xgboost_pred = xgboost_predictions$.pred,
+         randomf_resid = Global_active_power - randomf_pred,
+         xgboost_resid = Global_active_power - xgboost_pred)
+
+results %>% 
+  ggplot(.,aes(x = Global_active_power , y = randomf_pred))+
+  geom_point(color = "red")+
+  theme_minimal()+
+  labs(title = "Predicted (Random forest) vs Actual",x = "Actual",y = "Predicted")
+```
+
+```{r}
+ggplot(results, aes(x = randomf_pred, y = randomf_resid)) +
+  geom_point(color = "red") +
+  geom_hline(yintercept = 0, color = "blue") +
+  labs(title = "Random Forest: Residual Plot",
+       x = "Predicted Values",
+       y = "Residuals")
+```
+
+- we can continue by applying some tuning or other techniques and then deploying the model with vetiver and other packages. thanks for reading to this point, if you have an advice or you spotted a mistake please be comfortable sharing it so we can all get better together .
+
+
+
+
+
+
+
+
+
+
+
+
+
